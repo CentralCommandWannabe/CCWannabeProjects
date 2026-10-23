@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "map_name": "BarotraumaStation Multi-Z POC",
+  "map_path": "map_files/debug",
+  "map_file": "barotraumastation_multiz_poc.dmm",
+  "space_ruin_levels": 0,
+  "space_empty_levels": 0,
+  "planetary": 1,
+  "minetype": "none",
+  "traits": [
+    {
+      "Up": true,
+      "Linkage": null,
+      "Gravity": true,
+      "No Parallax": true,
+      "Baseturf": "/turf/open/floor/plating/ocean/dark",
+      "OshanTrait": true
+    },
+    {
+      "Up": true,
+      "Down": true,
+      "Linkage": null,
+      "Gravity": true,
+      "No Parallax": true,
+      "Baseturf": "/turf/open/openspace"
+    },
+    {
+      "Up": true,
+      "Down": true,
+      "Linkage": null,
+      "Gravity": true,
+      "No Parallax": true,
+      "Baseturf": "/turf/open/openspace"
+    },
+    {
+      "Down": true,
+      "Linkage": null,
+      "Gravity": true,
+      "No Parallax": true,
+      "Baseturf": "/turf/open/openspace"
+    }
+  ],
+  "ignored_unit_tests": [
+    "/datum/unit_test/maptest_required_map_items",
+    "/datum/unit_test/vendor_boards"
+  ]
+}

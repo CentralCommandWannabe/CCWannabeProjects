@@ -67,7 +67,8 @@
 
 /mob/living/proc/ZImpactDamage(turf/T, levels)
 	SEND_SIGNAL(T, COMSIG_TURF_MOB_FALL, src)
-	if(SEND_SIGNAL(src, COMSIG_LIVING_Z_IMPACT, levels, T) & NO_Z_IMPACT_DAMAGE)
+	// Water below an open hull should cushion the fall. Keep the ocean's COMSIG_TURF_MOB_FALL splash and existing landing modifiers intact.
+	if((SEND_SIGNAL(src, COMSIG_LIVING_Z_IMPACT, levels, T) & NO_Z_IMPACT_DAMAGE) || is_swimmable_ocean_turf(T))
 		return
 	visible_message(span_danger("[src] crashes into [T] with a sickening noise!"), \
 					span_userdanger("You crash into [T] with a sickening noise!"))

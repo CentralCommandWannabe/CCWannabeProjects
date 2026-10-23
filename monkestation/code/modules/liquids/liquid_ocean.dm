@@ -87,24 +87,25 @@ GLOBAL_LIST_EMPTY(initalized_ocean_areas)
 
 	astar_weight = 50
 
-	var/static/obj/effect/abstract/ocean_overlay/static_overlay
+	/// Shared ocean overlays, one per multi-Z rendering offset.
+	var/static/list/ocean_overlays_by_offset = list()
 	var/static/list/ocean_reagents = list(/datum/reagent/water = 10)
 	var/ocean_temp = T20C
 	var/list/ocean_turfs = list()
 	var/list/open_turfs = list()
 
-	///are we captured, this is easier than having to run checks on turfs for vents
+	/// Are we captured? Used for vent checks.
 	var/captured = FALSE
 
 	var/rand_variants = 0
 	var/rand_chance = 30
 
-	/// Itemstack to drop when dug by a shovel
+	/// Itemstack to drop when dug by a shovel.
 	var/obj/item/stack/dig_result = /obj/item/stack/ore/glass
-	/// Whether the turf has been dug or not
+	/// Whether the turf has been dug or not.
 	var/dug = FALSE
 
-	/// do we build a catwalk or plating with rods
+	/// Do we build a catwalk or plating with rods?
 	var/catwalk = FALSE
 
 /turf/open/floor/plating/ocean/Initialize(mapload)
@@ -112,11 +113,19 @@ GLOBAL_LIST_EMPTY(initalized_ocean_areas)
 	RegisterSignal(src, COMSIG_ATOM_ENTERED, PROC_REF(movable_entered))
 	RegisterSignal(src, COMSIG_TURF_MOB_FALL, PROC_REF(mob_fall))
 	RegisterSignal(src, COMSIG_TURF_CALCULATED_ADJACENT_ATMOS, PROC_REF(rebuild_adjacent))
-	if(!static_overlay)
-		static_overlay = new(null, ocean_reagents)
 
-	vis_contents += static_overlay
-	light_color = static_overlay.color
+	var/plane_offset = GET_Z_PLANE_OFFSET(z)
+	var/offset_key = "[plane_offset]"
+
+	var/obj/effect/abstract/ocean_overlay/ocean_visual = ocean_overlays_by_offset[offset_key]
+
+	if(!ocean_visual)
+		ocean_visual = new(null, ocean_reagents)
+		SET_PLANE_W_SCALAR(ocean_visual, AREA_PLANE, plane_offset)
+		ocean_overlays_by_offset[offset_key] = ocean_visual
+
+	vis_contents += ocean_visual
+	light_color = ocean_visual.color
 	SSliquids.unvalidated_oceans |= src
 	SSliquids.ocean_turfs |= src
 
@@ -124,7 +133,6 @@ GLOBAL_LIST_EMPTY(initalized_ocean_areas)
 		var/random = rand(1,rand_variants)
 		icon_state = "[base_icon_state][random]"
 		base_icon_state = "[base_icon_state][random]"
-
 
 /turf/open/floor/plating/ocean/Destroy()
 	UnregisterSignal(src, list(COMSIG_ATOM_ENTERED, COMSIG_TURF_MOB_FALL, COMSIG_TURF_CALCULATED_ADJACENT_ATMOS))

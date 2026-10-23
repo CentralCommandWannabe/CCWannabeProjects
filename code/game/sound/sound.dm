@@ -194,8 +194,12 @@
 	if(HAS_TRAIT(src, TRAIT_SOUND_DEBUGGED))
 		to_chat(src, span_admin("Max Range-[max_distance] Distance-[distance] Vol-[round(sound_to_use.volume, 0.01)] Sound-[sound_to_use.file]"))
 
-	//Let's recalculate the volume with pressure & falloff applied.
+	// Muffle positional sounds underwater, but preserve ambience.
 	sound_to_use.volume = calculate_mixed_volume(client, sound_to_use.volume, mixer_channel)
+
+	if(is_swimmable_ocean_turf(get_turf(src)) && channel != CHANNEL_AMBIENCE && channel != CHANNEL_BUZZ && mixer_channel != CHANNEL_AMBIENCE && mixer_channel != CHANNEL_BUZZ)
+		sound_to_use.volume *= 0.4
+
 	SEND_SOUND(src, sound_to_use)
 
 /proc/sound_to_playing_players(soundin, volume = 100, vary = FALSE, frequency = 0, channel = 0, pressure_affected = FALSE, sound/S)

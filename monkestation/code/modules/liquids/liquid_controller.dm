@@ -15,6 +15,7 @@ SUBSYSTEM_DEF(liquids)
 	var/list/ocean_turfs = list()
 	var/list/currentrun_active_ocean_turfs = list()
 	var/list/unvalidated_oceans = list()
+	var/list/active_ocean_columns = list()
 	var/ocean_counter = 0
 
 	var/run_type = SSLIQUIDS_RUN_TYPE_GROUPS
