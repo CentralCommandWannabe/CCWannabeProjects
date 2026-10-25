@@ -7812,6 +7812,7 @@
 #include "monkestation\code\modules\liquids\ocean_flora.dm"
 #include "monkestation\code\modules\liquids\ocean_generator.dm"
 #include "monkestation\code\modules\liquids\ocean_water_columns.dm"
+#include "monkestation\code\modules\liquids\ocean_water_compartments.dm"
 #include "monkestation\code\modules\liquids\tools.dm"
 #include "monkestation\code\modules\loadouts\loadout_middleware.dm"
 #include "monkestation\code\modules\loadouts\loadout_outfit_helper.dm"

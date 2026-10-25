@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "map_name": "BarotraumaStation Multi-Z POC",
+  "map_name": "BarotraumaStation Multi-Z POC (Stage C Test Rooms)",
   "map_path": "map_files/debug",
-  "map_file": "barotraumastation_multiz_poc.dmm",
+  "map_file": "barotraumastation_multiz_poc_stage_c.dmm",
   "space_ruin_levels": 0,
   "space_empty_levels": 0,
   "planetary": 1,

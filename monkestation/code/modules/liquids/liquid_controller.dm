@@ -12,10 +12,14 @@ SUBSYSTEM_DEF(liquids)
 	var/list/temperature_queue = list()
 
 	var/list/active_ocean_turfs = list()
+	/// Active BarotraumaStation ocean columns bordering passable openings.
+	var/list/active_ocean_columns = list()
+
+	/// Round-robin cursor for processing active ocean columns.
+	var/next_ocean_column_index = 1
 	var/list/ocean_turfs = list()
 	var/list/currentrun_active_ocean_turfs = list()
 	var/list/unvalidated_oceans = list()
-	var/list/active_ocean_columns = list()
 	var/ocean_counter = 0
 
 	var/run_type = SSLIQUIDS_RUN_TYPE_GROUPS
@@ -45,7 +49,7 @@ SUBSYSTEM_DEF(liquids)
 	return ..()
 
 /datum/controller/subsystem/liquids/fire(resumed)
-	if(!length(active_groups) && !length(evaporation_queue) && !length(active_ocean_turfs) && !length(burning_turfs) && !length(unvalidated_oceans))
+	if(!length(active_groups) && !length(evaporation_queue) && !length(active_ocean_turfs) && !length(active_ocean_columns) && !length(burning_turfs) && !length(unvalidated_oceans))
 		return
 
 	list_clear_nulls(active_groups)
@@ -150,7 +154,30 @@ SUBSYSTEM_DEF(liquids)
 				if(MC_TICK_CHECK)
 					return
 				active_ocean.process_turf()
+			// BarotraumaStation: process only active ocean-column inlets.
+			// Round-robin scheduling limits work to 64 columns per pass.
+			var/processed_ocean_columns = 0
+
+			while(processed_ocean_columns < 64 && length(active_ocean_columns))
+				if(MC_TICK_CHECK)
+					break
+
+				if(next_ocean_column_index > length(active_ocean_columns))
+					next_ocean_column_index = 1
+
+				var/turf/open/openspace/ocean_column/active_column = active_ocean_columns[next_ocean_column_index]
+
+				next_ocean_column_index++
+				processed_ocean_columns++
+
+				if(QDELETED(active_column) || !istype(active_column, /turf/open/openspace/ocean_column))
+					active_ocean_columns -= active_column
+					continue
+
+				active_column.process_turf()
+
 			ocean_counter = 0
+
 		run_type = SSLIQUIDS_RUN_TYPE_TURFS
 
 	if(run_type == SSLIQUIDS_RUN_TYPE_TURFS)

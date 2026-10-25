@@ -240,7 +240,18 @@ GLOBAL_LIST_EMPTY(initalized_ocean_areas)
 		if(!isopenturf(directional_turf) || isoceanturf(directional_turf) || isspaceturf(directional_turf) || !TURFS_CAN_SHARE(src, directional_turf))
 			open_turfs -= direction
 		else
+			// Registered interiors use compartment flooding.
+			if(GLOB.ocean_water_compartment_registry.turf_to_compartment[directional_turf])
+				open_turfs -= direction
+				continue
+
+			// Don't inject legacy liquids while C3 is discovering this room.
+			var/datum/ocean_water_compartment_registry/registry = GLOB.ocean_water_compartment_registry
+			if(registry.auto_seed_lookup[directional_turf] || registry.auto_job?.visited[directional_turf])
+				continue
+
 			directional_turf.add_liquid_list(ocean_reagents, FALSE, ocean_temp)
+
 	if(!length(open_turfs))
 		SSliquids.active_ocean_turfs -= src
 
@@ -256,6 +267,7 @@ GLOBAL_LIST_EMPTY(initalized_ocean_areas)
 			open_turfs += direction
 
 	if(length(open_turfs))
+		GLOB.ocean_water_compartment_registry?.enqueue_exterior_neighbors(src)
 		SSliquids.active_ocean_turfs |= src
 	else if(src in SSliquids.active_ocean_turfs)
 		SSliquids.active_ocean_turfs -= src
