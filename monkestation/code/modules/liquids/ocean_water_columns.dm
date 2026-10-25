@@ -503,11 +503,14 @@
     /// The client hearing the local ocean drone; needed to silence it on exit.
     var/client/ocean_sound_client
     var/ocean_sound_volume = 0
+    var/next_ocean_sound_check_ds = 0
+    var/ocean_sound_recoveries = 0
     /// Slowdown is only active while submerged, never on a dry transition hole.
     var/swimming_slowdown_active = FALSE
     /// Ordinary walking footsteps should never be heard while suspended in water.
     var/swimming_footsteps_muted = FALSE
     var/next_swim_sound_at = 0
+    var/atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze/ocean_haze
     var/client/ocean_visual_client
     /// Four client-only tiled depth layers, with no individual mote timers.
     var/list/atom/movable/screen/ocean_parallax_plate/ocean_parallax_plates = list()
@@ -595,13 +598,24 @@
 /// plane-master state one tick to settle before rebuilding for the new Z.
 /datum/status_effect/ocean_swimming/proc/on_swimmer_z_changed(datum/source, turf/old_turf, turf/new_turf)
     SIGNAL_HANDLER
-    stop_ocean_visuals()
-    last_underwater_visual_z = 0
-    parallax_obstructed_checks = 0
-    next_parallax_environment_check_at = 0
-    next_mote_refresh_at = 0
+    if(is_submerged_ocean_turf(old_turf) && is_submerged_ocean_turf(new_turf))
+        // Keep screen/plane effects continuous while dropping old-world motes.
+        for(var/obj/effect/ocean_marine_snow_tile/p as anything in ocean_motes)
+            ocean_water_release_shared_mote(p)
+        ocean_motes.Cut()
+        for(var/obj/effect/ocean_marine_snow_tile/illuminated/p as anything in ocean_lit_motes)
+            ocean_water_release_shared_mote(p)
+        ocean_lit_motes.Cut()
+        ocean_lit_last_seen.Cut()
+        last_underwater_visual_z = new_turf.z
+        next_mote_refresh_at = 0
+        next_parallax_environment_check_at = 0
+    else
+        stop_ocean_visuals()
+        last_underwater_visual_z = 0
+        next_mote_refresh_at = 0
     z_transition_refresh_pending = TRUE
-    addtimer(CALLBACK(src, PROC_REF(complete_underwater_z_transition)), 2)
+    addtimer(CALLBACK(src, PROC_REF(complete_underwater_z_transition)), 1)
 
 /datum/status_effect/ocean_swimming/proc/complete_underwater_z_transition()
     if(QDELETED(src) || QDELETED(owner))
@@ -768,8 +782,6 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     // Defensive fallback for teleports or custom Z transitions which might
     // not pass through the usual movement callback ordering.
     if(last_underwater_visual_z && last_underwater_visual_z != current_turf?.z)
-        stop_ocean_visuals()
-        parallax_obstructed_checks = 0
         next_parallax_environment_check_at = 0
         next_mote_refresh_at = 0
     last_underwater_visual_z = current_turf?.z
@@ -779,8 +791,13 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         stop_ocean_visuals()
         return
     if(!ocean_visual_client)
-        owner.overlay_fullscreen("ocean_immersion_haze", /atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze)
+        ocean_haze = owner.overlay_fullscreen("ocean_immersion_haze", /atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze)
         ocean_visual_client = current_client
+    // D1: smooth depth palette; keep the same screen object across submerged Zs.
+    if(ocean_haze)
+        var/depth = ocean_water_depth_meters(current_turf)
+        ocean_haze.alpha = clamp(round(16 + depth * 0.32), 16, 76)
+        ocean_haze.color = rgb(clamp(round(22 - depth * 0.12), 4, 22), clamp(round(107 - depth * 0.49), 21, 107), clamp(round(135 - depth * 0.37), 40, 135))
     update_ocean_refraction()
     update_ocean_parallax()
     if(world.time < next_mote_refresh_at)
@@ -791,7 +808,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     // starfield through walls. Actual BYOND particles are animated client-side.
     var/list/obj/effect/ocean_marine_snow_tile/new_ambient = list()
     var/list/obj/effect/ocean_marine_snow_tile/illuminated/new_lit = list()
-    var/ambient_budget = 22
+    var/ambient_budget = 24
     var/lit_budget = 20
     var/list/visible_wet_turfs = list()
     for(var/turf/open/spot in view(7, owner))
@@ -802,7 +819,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         // and avoids regular grid patterns. Each emitter now emits ONE soft mote
         // at a time, not a rectangular sheet of pre-rendered bright flecks.
         var/hashed = (spot.x * 31 + spot.y * 17 + spot.z * 13) % 11
-        if(length(new_ambient) < ambient_budget && hashed < 5)
+        if(length(new_ambient) < ambient_budget && hashed < 7)
             var/ambient_variant = hashed < 3 ? 1 : 2
             var/obj/effect/ocean_marine_snow_tile/kept = null
             for(var/obj/effect/ocean_marine_snow_tile/previous as anything in ocean_motes)
@@ -960,6 +977,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     stop_ocean_parallax()
     stop_ocean_refraction()
     owner?.clear_fullscreen("ocean_immersion_haze", FALSE)
+    ocean_haze = null
     ocean_visual_client = null
 
 /// Stop only our dedicated loop; do not interfere with Oshan's other sounds.
@@ -968,6 +986,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         SEND_SOUND(ocean_sound_client, sound(null, repeat = FALSE, wait = FALSE, channel = CHANNEL_OCEAN_RUMBLE))
         ocean_sound_client = null
         ocean_sound_volume = 0
+        next_ocean_sound_check_ds = 0
 
 /// Play the continuous low-volume water bed for this client alone. It is
 /// separate from the area ambience and existing ship hum (CHANNEL_BUZZ).
@@ -981,12 +1000,23 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         return
 
     var/new_volume = calculate_mixed_volume(current_client, 17, CHANNEL_BUZZ)
-    if(ocean_sound_client == current_client && ocean_sound_volume == new_volume)
+    // A cached volume cannot prove that BYOND's channel is still playing.
+    if(ocean_sound_client == current_client && ocean_sound_volume == new_volume && world.time < next_ocean_sound_check_ds)
         return
-
+    var/still_playing = FALSE
+    if(new_volume > 0)
+        for(var/sound/active as anything in current_client.SoundQuery())
+            if(active.channel == CHANNEL_OCEAN_RUMBLE && active.repeat)
+                still_playing = TRUE
+                break
+    next_ocean_sound_check_ds = world.time + 50
+    if(ocean_sound_client == current_client && ocean_sound_volume == new_volume && still_playing)
+        return
+    if(ocean_sound_client == current_client && ocean_sound_volume > 0 && !still_playing && new_volume > 0)
+        ocean_sound_recoveries++
     if(new_volume <= 0)
         SEND_SOUND(current_client, sound(null, repeat = FALSE, wait = FALSE, channel = CHANNEL_OCEAN_RUMBLE))
-    else if(ocean_sound_client == current_client && ocean_sound_volume > 0)
+    else if(ocean_sound_client == current_client && ocean_sound_volume > 0 && still_playing)
         // Respect live White Noise/master mixer adjustments without restarting the loop.
         var/sound/updated_sound = sound(null, channel = CHANNEL_OCEAN_RUMBLE, volume = new_volume)
         updated_sound.status = SOUND_UPDATE

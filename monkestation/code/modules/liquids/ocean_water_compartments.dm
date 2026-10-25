@@ -66,6 +66,15 @@
 #define OCEAN_WATER_AUTO_SCAN_MAX_SEEDS 1024
 // Near-full rooms should look and behave submerged before numerical 100%.
 #define OCEAN_WATER_FULL_SWIM_FRACTION 0.98
+#define OCEAN_WATER_SURFACE_DEPTH_M 5
+#define OCEAN_WATER_METERS_PER_Z 25
+#define OCEAN_WATER_HEIGHT_M 2.5
+#define OCEAN_WATER_KPA_PER_M 9.81
+#define OCEAN_WATER_ATMOS_KPA 101.325
+#define OCEAN_WATER_MAX_AIR_KPA 2500
+#define OCEAN_WATER_FLOW_REFERENCE_KPA 40
+#define OCEAN_WATER_FLOW_EPSILON_KPA 0.2
+
 
 /// Stable across ChangeTurf() replacing the turf object at this location.
 /proc/ocean_water_volume_tile_key(turf/tile)
@@ -573,6 +582,25 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     var/visual_followup = FALSE
     /// One stable in-room source for the separate compartment filling ambience.
     var/turf/ambient_audio_turf
+    /// Isothermal, room-average air mass in dry-room equivalent volume units.
+    var/air_reference_units = -1
+
+/datum/ocean_water_registered_compartment/proc/get_air_remaining_units()
+    return max(1, water_capacity_units - water_volume_units)
+
+/datum/ocean_water_registered_compartment/proc/get_air_pressure_kpa()
+    if(air_reference_units < 0)
+        air_reference_units = water_capacity_units
+    if(water_capacity_units <= 0)
+        return OCEAN_WATER_ATMOS_KPA
+    return clamp(OCEAN_WATER_ATMOS_KPA * max(0, air_reference_units) / get_air_remaining_units(), 0, OCEAN_WATER_MAX_AIR_KPA)
+
+/datum/ocean_water_registered_compartment/proc/get_water_pressure_kpa()
+    return get_air_pressure_kpa() + get_fill_fraction() * OCEAN_WATER_HEIGHT_M * OCEAN_WATER_KPA_PER_M
+
+/datum/ocean_water_registered_compartment/proc/get_ocean_pressure_kpa()
+    var/turf/sample = length(ocean_inlet_sources) ? ocean_inlet_sources[1] : (length(member_turfs) ? member_turfs[1] : null)
+    return ocean_water_exterior_pressure_kpa(sample)
 
 /datum/ocean_water_registered_compartment/proc/get_fill_fraction()
     if(water_capacity_units <= 0)
@@ -583,6 +611,8 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     if(!isnum(new_volume))
         return water_volume_units
     water_volume_units = clamp(new_volume, 0, water_capacity_units)
+    if(water_volume_units <= 0)
+        air_reference_units = water_capacity_units
     // Admin draining a full room should wake the existing ocean breach again.
     GLOB.ocean_water_compartment_registry?.update_ocean_processing(src)
     GLOB.ocean_water_compartment_registry?.update_transfer_processing(src)
@@ -774,6 +804,8 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     var/current_events = 0
     var/current_atoms_pushed = 0
     var/audio_events = 0
+    var/conservation_warnings = 0
+    var/last_conservation_error = 0
 
 /// Recompute physical breach count only after region registration or geometry
 /// changes. A breach touching two tiles has two inlet edges; an actual ocean-
@@ -881,6 +913,33 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
  * native liquid groups and their processing would double-simulate flooding.
  * The source of truth remains each compartment's WU volume.
  */
+/// Estimated physical depth from multiz links, independent of numeric Z IDs.
+/proc/ocean_water_depth_meters(turf/at)
+    if(!at)
+        return 0
+    var/levels_down = 0
+    var/turf/cursor = at
+    while(levels_down < OCEAN_WATER_MAX_VERTICAL_SHAFT)
+        var/turf/next = GET_TURF_ABOVE(cursor)
+        if(!next || next == cursor)
+            break
+        cursor = next
+        levels_down++
+    return OCEAN_WATER_SURFACE_DEPTH_M + levels_down * OCEAN_WATER_METERS_PER_Z
+
+/proc/ocean_water_exterior_pressure_kpa(turf/at)
+    return OCEAN_WATER_ATMOS_KPA + ocean_water_depth_meters(at) * OCEAN_WATER_KPA_PER_M
+
+/proc/ocean_water_visual_alpha(fraction)
+    var/state = ocean_water_depth_state(fraction)
+    return state <= 0 ? 0 : clamp(70 + state * 17, 70, 155)
+
+/// Pressure-limited aperture budget, WU per processing delta.
+/proc/ocean_water_pressure_flow_budget(head_kpa, cap, delta_seconds)
+    if(!isnum(head_kpa) || head_kpa <= OCEAN_WATER_FLOW_EPSILON_KPA || delta_seconds <= 0)
+        return 0
+    return max(0, cap * delta_seconds * clamp(sqrt(head_kpa / OCEAN_WATER_FLOW_REFERENCE_KPA), 0, 2.5))
+
 /proc/ocean_water_native_color()
     // Use precisely the same reagent-mixing helper that native ocean overlays
     // use. Cache the result: the ocean water reagent recipe is constant.
@@ -981,7 +1040,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     . += top_water
     var/mutable_appearance/front_water = mutable_appearance('icons/obj/effects/liquid_overlays.dmi', "stage[stage_number]_bottom", offset_spokesman = bridge_turf, plane = GAME_PLANE_UPPER, layer = ABOVE_MOB_LAYER)
     front_water.color = color
-    front_water.alpha = 175
+    front_water.alpha = alpha
     . += front_water
 
 /obj/effect/ocean_water_shaft
@@ -1001,7 +1060,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     color = ocean_water_native_color()
 
 /obj/effect/ocean_water_shaft/proc/set_depth_state(new_state, water_fraction = 0)
-    var/new_water_alpha = clamp(70 + round(water_fraction * 85), 70, 155)
+    var/new_water_alpha = ocean_water_visual_alpha(water_fraction)
     if(liquid_depth_state == new_state && (new_state <= 0 || alpha == new_water_alpha))
         return
     liquid_depth_state = new_state
@@ -1040,7 +1099,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     . += top_water
     var/mutable_appearance/front_water = mutable_appearance('icons/obj/effects/liquid_overlays.dmi', "stage[stage_number]_bottom", offset_spokesman = opening, plane = GAME_PLANE_UPPER, layer = ABOVE_MOB_LAYER)
     front_water.color = color
-    front_water.alpha = 175
+    front_water.alpha = alpha
     . += front_water
 
 /// One small, directional sheet of falling water occupying the actual breach.
@@ -1057,7 +1116,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     layer = BELOW_OPEN_DOOR_LAYER
     // Fully flooded floor water uses alpha 155, so match that transparency.
     // Per-pixel transparency in the DMI is preserved.
-    alpha = 155
+    alpha = 110
     var/flow_direction = 0
 
 /obj/effect/ocean_water_gushing/Initialize(mapload)
@@ -1324,7 +1383,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
                 // Match upstream liquid group opacity bounds for water.
                 // Retain native full-tile ocean water, but allow floors and
                 // movable objects to remain readable through the water mask.
-                surface.alpha = clamp(70 + round(fraction * 85), 70, 155)
+                surface.alpha = ocean_water_visual_alpha(fraction)
                 surface.set_depth_state(depth_state)
             // Covers stationary characters when the water rises around them.
             // Immersion is synchronized once per stage change above, not
@@ -1656,7 +1715,7 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     if(!surface)
         surface = new /obj/effect/ocean_water_surface/door_bridge(bridge)
         door_surface_by_turf[bridge] = surface
-    surface.alpha = clamp(70 + round(water_fraction * 85), 70, 155)
+    surface.alpha = ocean_water_visual_alpha(water_fraction)
     surface.set_depth_state(new_state)
     refresh_swimmer_on_turf(bridge)
 
@@ -1714,8 +1773,12 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     var/amount = min(max(0, requested), source_room.water_volume_units, max(0, target_room.water_capacity_units - target_room.water_volume_units))
     if(amount <= 0)
         return 0
+    var/combined_before = source_room.water_volume_units + target_room.water_volume_units
     source_room.water_volume_units -= amount
     target_room.water_volume_units += amount
+    last_conservation_error = abs(combined_before - source_room.water_volume_units - target_room.water_volume_units)
+    if(last_conservation_error > 0.01)
+        conservation_warnings++
     transfer_total_moved_units += amount
     transfer_last_tick_moved_units += amount
     update_ocean_processing(source_room)
@@ -1773,6 +1836,17 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
             return direction
     return 0
 
+/// Equalize modeled air in TWO rooms connected by an open aperture.
+/datum/ocean_water_compartment_registry/proc/equalize_link_air(datum/ocean_water_registered_compartment/a, datum/ocean_water_registered_compartment/b)
+    a.get_air_pressure_kpa()
+    b.get_air_pressure_kpa()
+    var/free_a = a.get_air_remaining_units()
+    var/free_b = b.get_air_remaining_units()
+    var/mass = max(0, a.air_reference_units) + max(0, b.air_reference_units)
+    var/density = mass / max(1, free_a + free_b)
+    a.air_reference_units = density * free_a
+    b.air_reference_units = density * free_b
+
 /// The door itself isn't a water-storage compartment. It is one throttled link.
 /datum/ocean_water_compartment_registry/proc/process_door_flow(datum/ocean_water_registered_connection/link, delta_seconds)
     if(!link)
@@ -1782,42 +1856,29 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
         clear_door_waterfall(link.target_door)
         return
     var/list/datum/ocean_water_registered_compartment/sides = link.adjacent_compartments
-    // Common case: a doorway joins exactly two independent rooms.
-    // Ambiguous 3+-room door footprints need dedicated junction capacity later.
     if(length(sides) != 2)
+        return // non-manifold junctions require an explicit link volume
+    var/datum/ocean_water_registered_compartment/a = sides[1]
+    var/datum/ocean_water_registered_compartment/b = sides[2]
+    if(!(a in compartments) || !(b in compartments))
         return
-    var/datum/ocean_water_registered_compartment/first = sides[1]
-    var/datum/ocean_water_registered_compartment/second = sides[2]
-    if(!(first in compartments) || !(second in compartments))
-        return
-    var/total_capacity = first.water_capacity_units + second.water_capacity_units
-    if(total_capacity <= 0)
-        return
-    var/fraction = (first.water_volume_units + second.water_volume_units) / total_capacity
-    var/excess_first = first.water_volume_units - (fraction * first.water_capacity_units)
-    // Flow weakens as water levels equalize. Bounded approximation, not CFD.
-    var/pressure_difference = abs(first.get_fill_fraction() - second.get_fill_fraction())
-    var/budget = OCEAN_WATER_DOOR_FLOW_WU_PER_SECOND * delta_seconds * clamp(pressure_difference * 2, 0, 1.5)
-    if(excess_first > 0.01)
-        var/moved = transfer_water(first, second, min(excess_first, budget))
-        if(moved > 0)
-            var/turf/door_turf = get_turf(link.target_door)
-            var/flow_dir = ocean_water_flow_direction_at_door(door_turf, second) || ocean_water_direction_between_rooms(first, second)
-            update_door_waterfall(link, flow_dir, moved / delta_seconds, second)
-            emit_local_flow(door_turf, flow_dir, moved / delta_seconds, second, first)
-            note_room_filling(second, moved / delta_seconds)
-            note_room_filling(first, moved / delta_seconds)
-    else if(excess_first < -0.01)
-        var/moved = transfer_water(second, first, min(-excess_first, budget))
-        if(moved > 0)
-            var/turf/door_turf = get_turf(link.target_door)
-            var/flow_dir = ocean_water_flow_direction_at_door(door_turf, first) || ocean_water_direction_between_rooms(second, first)
-            update_door_waterfall(link, flow_dir, moved / delta_seconds, first)
-            emit_local_flow(door_turf, flow_dir, moved / delta_seconds, first, second)
-            note_room_filling(first, moved / delta_seconds)
-            note_room_filling(second, moved / delta_seconds)
-    else
+    equalize_link_air(a,b)
+    var/head = a.get_water_pressure_kpa() - b.get_water_pressure_kpa()
+    if(abs(head) <= OCEAN_WATER_FLOW_EPSILON_KPA)
         clear_door_waterfall(link.target_door)
+        return
+    var/datum/ocean_water_registered_compartment/source = head > 0 ? a : b
+    var/datum/ocean_water_registered_compartment/target = head > 0 ? b : a
+    var/amount = ocean_water_pressure_flow_budget(abs(head), OCEAN_WATER_DOOR_FLOW_WU_PER_SECOND, delta_seconds)
+    var/moved = transfer_water(source, target, amount)
+    if(moved <= 0)
+        clear_door_waterfall(link.target_door)
+        return
+    var/turf/aperture = get_turf(link.target_door)
+    var/dir = ocean_water_flow_direction_at_door(aperture, target) || ocean_water_direction_between_rooms(source, target)
+    update_door_waterfall(link, dir, moved / delta_seconds, target)
+    emit_local_flow(aperture, dir, moved / delta_seconds, target, source)
+    note_room_filling(target, moved / delta_seconds)
 
 /// B3: Move water between physical neighboring decks along a single shaft.
 /// The shaft must have a valid ordered route between the involved Z levels.
@@ -1826,86 +1887,47 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
     if(!link || !link.has_two_sides())
         return
     var/list/datum/ocean_water_registered_compartment/ordered = link.adjacent_compartments.Copy()
-    // In a multi-deck shaft, flow only between consecutive registered elevations,
-    // not directly from the ocean through every level.
     for(var/i in 1 to length(ordered))
         for(var/j in (i + 1) to length(ordered))
-            var/datum/ocean_water_registered_compartment/first = ordered[i]
-            var/datum/ocean_water_registered_compartment/second = ordered[j]
-            if(first.scanned_z > second.scanned_z)
-                ordered[i] = second
-                ordered[j] = first
-    // A branching shaft with multiple separate rooms on the same deck needs
-    // junction capacity. Skip it rather than allowing leaks through walls.
+            var/datum/ocean_water_registered_compartment/left = ordered[i]
+            var/datum/ocean_water_registered_compartment/right = ordered[j]
+            if(left.scanned_z > right.scanned_z)
+                ordered[i] = right
+                ordered[j] = left
     var/previous_z = 0
-    for(var/datum/ocean_water_registered_compartment/candidate as anything in ordered)
-        if(!(candidate in compartments) || candidate.scanned_z == previous_z)
+    for(var/datum/ocean_water_registered_compartment/room as anything in ordered)
+        if(!(room in compartments) || room.scanned_z == previous_z)
             return
-        previous_z = candidate.scanned_z
-    // Track whether hydrostatic ocean pressure has reached this level through
-    // already saturated lower rooms. This is NOT an ocean inlet for upper decks.
-    var/pressure_from_below = FALSE
-    for(var/level_index in 2 to length(ordered))
-        var/datum/ocean_water_registered_compartment/lower = ordered[level_index - 1]
-        var/datum/ocean_water_registered_compartment/upper = ordered[level_index]
-        if(lower.ocean_ingress_edges > 0)
-            pressure_from_below = TRUE
-        var/lower_fill = lower.get_fill_fraction()
-        // Gravity can drain an upper compartment into an unsaturated lower one.
-        // Avoid draining a pressurized upper room straight back into its source.
-        if(upper.water_volume_units > 0 && lower_fill < (pressure_from_below ? 0.85 : 1))
-            // The C4.1 room-average solver drained distant shafts before any
-            // shallow water had visibly spread. For an *actively ocean-fed*
-            // upper room, wait for a small, distance-dependent surface layer.
-            // This gate is skipped for retained water after a breach is fixed:
-            // no phantom stranded water in a room with an open drain.
-            var/may_drain = TRUE
-            if(upper.ocean_ingress_edges > 0 && !link.entry_reached_by_room[upper])
-                var/minimum_surface = link.entry_threshold_by_room[upper]
-                if(isnull(minimum_surface))
-                    var/closest_inlet = 100
-                    for(var/turf/inlet as anything in upper.ocean_inlet_sources)
-                        for(var/turf/shaft_turf as anything in link.opening_turfs)
-                            if(shaft_turf.z == upper.scanned_z)
-                                closest_inlet = min(closest_inlet, get_dist(inlet, shaft_turf))
-                    minimum_surface = clamp(0.06 + closest_inlet * 0.018, 0.06, 0.22)
-                    link.entry_threshold_by_room[upper] = minimum_surface
-                // Near the inlet it may fall immediately; on the far side,
-                // the shallow-water stage must first become visible.
-                if(upper.get_fill_fraction() < minimum_surface)
-                    may_drain = FALSE
-                else
-                    link.entry_reached_by_room[upper] = TRUE
-            var/moved_down = may_drain ? transfer_water(upper, lower, OCEAN_WATER_VERTICAL_DOWN_WU_PER_SECOND * delta_seconds) : 0
-            if(moved_down > 0)
-                emit_vertical_flow(link, upper, lower, moved_down / delta_seconds)
-                note_room_filling(lower, moved_down / delta_seconds)
-            lower_fill = lower.get_fill_fraction()
-        if(ocean_processing_enabled && pressure_from_below && lower_fill >= OCEAN_WATER_VERTICAL_RISE_THRESHOLD && upper.water_volume_units < upper.water_capacity_units)
-            // Source water reaches upper compartment THROUGH the full lower room.
-            // This is water from a proven B2 ocean inlet, not an infinite source
-            // appearing beside upper deck. Count it as external ocean ingress.
-            var/remaining = upper.water_capacity_units - upper.water_volume_units
-            var/source_rate = min(OCEAN_WATER_VERTICAL_UP_WU_PER_SECOND, OCEAN_WATER_INGRESS_WU_PER_SECOND)
-            var/added = min(remaining, source_rate * delta_seconds)
-            if(added > 0)
-                // Model the water crossing the saturated lower compartment,
-                // followed by immediate B2 make-up water entering its real inlet.
-                // No water is generated by the shaft itself.
-                lower.water_volume_units -= added
-                upper.water_volume_units += added
-                lower.water_volume_units += added
-                ocean_total_added_units += added
-                transfer_total_moved_units += added
-                transfer_last_tick_moved_units += added
-                update_ocean_processing(upper)
-                update_transfer_processing(upper)
-                queue_visual_refresh(upper)
-                emit_vertical_flow(link, lower, upper, added / delta_seconds)
-                note_room_filling(upper, added / delta_seconds)
-        // Only propagate ocean pressure further upward when this intermediary
-        // room is also nearly full. A hole is not enough to skip a dry deck.
-        pressure_from_below = pressure_from_below && upper.get_fill_fraction() >= OCEAN_WATER_VERTICAL_RISE_THRESHOLD
+        previous_z = room.scanned_z
+    for(var/i in 2 to length(ordered))
+        var/datum/ocean_water_registered_compartment/lower = ordered[i - 1]
+        var/datum/ocean_water_registered_compartment/upper = ordered[i]
+        var/levels = upper.scanned_z - lower.scanned_z
+        if(levels <= 0 || levels > OCEAN_WATER_MAX_VERTICAL_SHAFT)
+            continue
+        var/gravity_head = levels * OCEAN_WATER_METERS_PER_Z * OCEAN_WATER_KPA_PER_M
+        var/head = upper.get_water_pressure_kpa() + gravity_head - lower.get_water_pressure_kpa()
+        var/datum/ocean_water_registered_compartment/source = head > 0 ? upper : lower
+        var/datum/ocean_water_registered_compartment/target = head > 0 ? lower : upper
+        // Ocean-fed upper decks still wait for water to reach the shaft mouth.
+        if(source == upper && upper.ocean_ingress_edges > 0 && !link.entry_reached_by_room[upper])
+            var/min_surface = link.entry_threshold_by_room[upper]
+            if(isnull(min_surface))
+                var/dist = 100
+                for(var/turf/inlet as anything in upper.ocean_inlet_sources)
+                    for(var/turf/hole as anything in link.opening_turfs)
+                        if(hole.z == upper.scanned_z)
+                            dist = min(dist, get_dist(inlet,hole))
+                min_surface = clamp(0.06 + dist * 0.018, 0.06, 0.22)
+                link.entry_threshold_by_room[upper] = min_surface
+            if(upper.get_fill_fraction() < min_surface)
+                continue
+            link.entry_reached_by_room[upper] = TRUE
+        var/rate = head > 0 ? OCEAN_WATER_VERTICAL_DOWN_WU_PER_SECOND : OCEAN_WATER_VERTICAL_UP_WU_PER_SECOND
+        var/moved = transfer_water(source, target, ocean_water_pressure_flow_budget(abs(head), rate, delta_seconds))
+        if(moved > 0)
+            emit_vertical_flow(link, source, target, moved / delta_seconds)
+            note_room_filling(target, moved / delta_seconds)
 
 /datum/ocean_water_compartment_registry/proc/process_compartment_transfers(delta_seconds)
     if(!transfer_processing_enabled || !length(active_transfer_compartments))
@@ -1942,12 +1964,16 @@ GLOBAL_DATUM_INIT(ocean_water_compartment_registry, /datum/ocean_water_compartme
         for(var/datum/ocean_water_registered_compartment/room as anything in to_process)
             if(!(room in active_ocean_compartments))
                 continue
-            var/rate = min(room.ocean_ingress_edges * OCEAN_WATER_INGRESS_WU_PER_SECOND, OCEAN_WATER_INGRESS_MAX_WU_PER_SECOND)
             var/remaining_capacity = room.water_capacity_units - room.water_volume_units
-            if(rate <= 0 || remaining_capacity <= 0)
+            var/head = room.get_ocean_pressure_kpa() - room.get_water_pressure_kpa()
+            var/max_rate = min(room.ocean_ingress_edges * OCEAN_WATER_INGRESS_WU_PER_SECOND, OCEAN_WATER_INGRESS_MAX_WU_PER_SECOND)
+            if(max_rate <= 0 || remaining_capacity <= 0 || head <= OCEAN_WATER_FLOW_EPSILON_KPA)
                 update_ocean_processing(room)
                 continue
-            var/added = min(remaining_capacity, rate * delta_seconds)
+            var/added = min(remaining_capacity, ocean_water_pressure_flow_budget(head, max_rate, delta_seconds))
+            if(added <= 0)
+                continue
+
             room.water_volume_units += added
             ocean_total_added_units += added
             update_ocean_processing(room)
@@ -2824,6 +2850,28 @@ ADMIN_VERB(ocean_water_debug_waterfall, R_DEBUG, FALSE, "Water: Inspect Waterfal
         var/source_text = exterior ? "([exterior.x],[exterior.y],[exterior.z])" : "unknown"
         to_chat(user, span_notice("Waterfall [room_id]: visual inlet ([inlet.x],[inlet.y],[inlet.z]); exterior source [source_text]; inward [dir2text(inward)]; sprite at ([gush.x],[gush.y],[gush.z]); pixel shift ([gush.pixel_x],[gush.pixel_y])."))
 
+/// D0 test contract checks inspect *only registered rooms*.
+ADMIN_VERB(ocean_water_d0_contracts, R_DEBUG, FALSE, "Water: D0 Contracts", "Check volume, air pressure and water conservation diagnostics.", ADMIN_CATEGORY_DEBUG)
+    var/datum/ocean_water_compartment_registry/r = GLOB.ocean_water_compartment_registry
+    var/errors = 0
+    var/total = 0
+    for(var/datum/ocean_water_registered_compartment/room as anything in r.compartments)
+        total += room.water_volume_units
+        if(room.water_volume_units < -0.01 || room.water_volume_units > room.water_capacity_units + 0.01)
+            errors++
+        var/p = room.get_air_pressure_kpa()
+        if(!isnum(p) || p < 0 || p > OCEAN_WATER_MAX_AIR_KPA)
+            errors++
+    to_chat(user, span_notice("D0: [length(r.compartments)] registered rooms, [round(total,0.1)] WU, [errors] room invariant violations, [r.conservation_warnings] transfer conservation warnings."))
+    to_chat(user, span_notice("D0 workload: [length(r.active_ocean_compartments)] ocean rooms, [length(r.active_transfer_compartments)] transfer rooms, [length(r.active_visual_compartments)] visual batches, [length(r.audio_emitters)] audio emitters."))
+
+ADMIN_VERB(ocean_water_d1_inspect, R_DEBUG, FALSE, "Water: D1 Pressure", "Inspect local hydrostatic pressure and trapped air.", ADMIN_CATEGORY_DEBUG)
+    var/datum/ocean_water_registered_compartment/room = GLOB.ocean_water_compartment_registry.get_compartment(get_turf(user.mob))
+    if(!room)
+        to_chat(user, span_warning("Stand on an interior floor tile."))
+        return
+    var/turf/sample = length(room.member_turfs) ? room.member_turfs[1] : null
+    to_chat(user, span_notice("C[room.compartment_id]: estimated depth [round(ocean_water_depth_meters(sample),0.1)] m; air [round(room.get_air_pressure_kpa(),0.1)] kPa; room water head [round(room.get_water_pressure_kpa(),0.1)] kPa; exterior [round(room.get_ocean_pressure_kpa(),0.1)] kPa; free air [round(room.get_air_remaining_units(),0.1)] WU."))
 #undef OCEAN_WATER_INGRESS_WU_PER_SECOND
 #undef OCEAN_WATER_INGRESS_MAX_DELTA_SECONDS
 #undef OCEAN_WATER_INGRESS_MAX_WU_PER_SECOND
@@ -2852,4 +2900,12 @@ ADMIN_VERB(ocean_water_debug_waterfall, R_DEBUG, FALSE, "Water: Inspect Waterfal
 #undef OCEAN_WATER_AUDIO_ROOM_CHANNEL
 #undef OCEAN_WATER_AUTO_SCAN_BUDGET
 #undef OCEAN_WATER_AUTO_SCAN_MAX_SEEDS
+#undef OCEAN_WATER_SURFACE_DEPTH_M
+#undef OCEAN_WATER_METERS_PER_Z
+#undef OCEAN_WATER_HEIGHT_M
+#undef OCEAN_WATER_KPA_PER_M
+#undef OCEAN_WATER_ATMOS_KPA
+#undef OCEAN_WATER_MAX_AIR_KPA
+#undef OCEAN_WATER_FLOW_REFERENCE_KPA
+#undef OCEAN_WATER_FLOW_EPSILON_KPA
 #undef OCEAN_WATER_FULL_SWIM_FRACTION
