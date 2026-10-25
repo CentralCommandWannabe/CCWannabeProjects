@@ -315,22 +315,22 @@
     icon_state = "far_silt"
     width = 32
     height = 32
-    count = 5
-    spawning = 0.43
+    count = 3
+    spawning = 0.23
     lifespan = 7 SECONDS
     fade = 2.8 SECONDS
-    color = "#80A6B879"
+    color = "#80A6B84C"
     position = generator(GEN_BOX, list(-12,-12,0), list(12,12,0), NORMAL_RAND)
     velocity = generator(GEN_VECTOR, list(-0.025,-0.025,0), list(0.04,0.028,0), NORMAL_RAND)
     scale = generator(GEN_VECTOR, list(0.44,0.44), list(0.75,0.75), NORMAL_RAND)
 
 /particles/ocean_marine_snow/middle
     icon_state = "mid_silt"
-    count = 5
-    spawning = 0.58
+    count = 3
+    spawning = 0.30
     lifespan = 6 SECONDS
     fade = 2.4 SECONDS
-    color = "#92B6C38B"
+    color = "#92B6C357"
     velocity = generator(GEN_VECTOR, list(-0.045,-0.025,0), list(0.055,0.045,0), NORMAL_RAND)
     scale = generator(GEN_VECTOR, list(0.65,0.65), list(1.0,1.0), NORMAL_RAND)
 
@@ -338,21 +338,21 @@
 // actually brightens. We do not create any artificial rays or light sources.
 /particles/ocean_marine_snow/illuminated
     icon_state = "lit_silt"
-    count = 4
-    spawning = 0.72
-    lifespan = 4.7 SECONDS
+    count = 3
+    spawning = 0.33
+    lifespan = 5.5 SECONDS
     fade = 1.8 SECONDS
-    color = "#B3D6DDAA"
+    color = "#B3D6DD95"
     velocity = generator(GEN_VECTOR, list(-0.065,-0.04,0), list(0.07,0.06,0), NORMAL_RAND)
     scale = generator(GEN_VECTOR, list(0.78,0.78), list(1.15,1.15), NORMAL_RAND)
 
 /particles/ocean_marine_snow/illuminated/foreground
     icon_state = "near_silt"
-    count = 3
-    spawning = 0.44
-    lifespan = 4 SECONDS
+    count = 2
+    spawning = 0.20
+    lifespan = 5 SECONDS
     fade = 1.7 SECONDS
-    color = "#C6E7E9A8"
+    color = "#C6E7E982"
     velocity = generator(GEN_VECTOR, list(-0.09,-0.04,0), list(0.12,0.08,0), NORMAL_RAND)
     scale = generator(GEN_VECTOR, list(0.9,0.9), list(1.4,1.4), NORMAL_RAND)
 
@@ -364,8 +364,11 @@
     density = FALSE
     anchored = TRUE
     mouse_opacity = MOUSE_OPACITY_TRANSPARENT
+    // Below the native lighting composite so ocean darkness obscures silt.
+    // No bright ABOVE_LIGHTING_PLANE specks punched through unlit water.
     plane = GAME_PLANE
     layer = BELOW_MOB_LAYER
+    alpha = 82
 
 /obj/effect/ocean_marine_snow_tile/Initialize(mapload)
     . = ..()
@@ -379,6 +382,8 @@
     particles = new /particles/ocean_marine_snow/middle
 
 /obj/effect/ocean_marine_snow_tile/illuminated
+    plane = GAME_PLANE
+    alpha = 150
     layer = BELOW_MOB_LAYER + 0.02
 
 /obj/effect/ocean_marine_snow_tile/illuminated/Initialize(mapload)
@@ -503,18 +508,26 @@
     /// The client hearing the local ocean drone; needed to silence it on exit.
     var/client/ocean_sound_client
     var/ocean_sound_volume = 0
+    /// Periodically validate that the client is STILL playing the rumble.
+    /// BYOND or another sound sender can stop a channel without notifying us.
+    var/next_ocean_sound_check_at = 0
+    var/ocean_sound_recoveries = 0
     /// Slowdown is only active while submerged, never on a dry transition hole.
     var/swimming_slowdown_active = FALSE
     /// Ordinary walking footsteps should never be heard while suspended in water.
     var/swimming_footsteps_muted = FALSE
     var/next_swim_sound_at = 0
+    var/atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze/ocean_haze
     var/client/ocean_visual_client
     /// Four client-only tiled depth layers, with no individual mote timers.
     var/list/atom/movable/screen/ocean_parallax_plate/ocean_parallax_plates = list()
     var/atom/movable/plane_master_controller/ocean_refraction_controller
     var/ocean_refraction_enabled = TRUE
     /// Independent A/B switch so refraction and atlas clipping can be isolated.
-    var/ocean_parallax_enabled = TRUE
+    // Screen-centred 512px texture plates produce an obvious circular halo
+    // whose origin follows the diver. Keep code for debugging but OFF by
+    // default; anchored world-space sediment is the normal baseline.
+    var/ocean_parallax_enabled = FALSE
     var/next_parallax_environment_check_at = 0
     /// Avoid dropping four plates on a one-tile obstruction threshold.
     var/parallax_obstructed_checks = 0
@@ -590,13 +603,22 @@
         next_swim_sound_at = world.time + 5
         playsound(current_turf, pick('sound/effects/water_wade1.ogg', 'sound/effects/water_wade2.ogg', 'sound/effects/water_wade3.ogg', 'sound/effects/water_wade4.ogg'), 22, TRUE, 0, falloff_distance = 1)
 
-/// Multi-Z travel does not have to emit the same movement signal as horizontal
-/// walking. Remove old-Z screen attachments immediately, then allow HUD and
-/// plane-master state one tick to settle before rebuilding for the new Z.
+/// Keep client-owned underwater haze and parallax mounted across a water-to-water
+/// Z change. The previous teardown left the viewport visibly dry for two ticks.
+/// Old world motes cannot render on the new Z and are reconciled on refresh.
 /datum/status_effect/ocean_swimming/proc/on_swimmer_z_changed(datum/source, turf/old_turf, turf/new_turf)
     SIGNAL_HANDLER
-    stop_ocean_visuals()
-    last_underwater_visual_z = 0
+    if(is_submerged_ocean_turf(old_turf) && is_submerged_ocean_turf(new_turf) && owner?.client)
+        last_underwater_visual_z = new_turf.z
+        // Rebind retained screen plates to the viewer's NEW plane offset,
+        // without destroying them or restarting their animation.
+        for(var/atom/movable/screen/ocean_parallax_plate/P as anything in ocean_parallax_plates)
+            if(!QDELETED(P))
+                SET_PLANE_EXPLICIT(P, GAME_PLANE_FOV_HIDDEN, owner)
+    else
+        // The destination is actually dry, or the client disappeared.
+        stop_ocean_visuals()
+        last_underwater_visual_z = 0
     parallax_obstructed_checks = 0
     next_parallax_environment_check_at = 0
     next_mote_refresh_at = 0
@@ -734,7 +756,13 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     GLOB.ocean_water_shared_mote_claims -= key
     GLOB.ocean_water_shared_motes -= key
     if(!QDELETED(emitter))
-        qdel(emitter)
+        // The only visible changes should be gradual particle lifetime fade.
+        // Emitters are prewarmed outside normal viewport, so a 5 second
+        // cleanup is usually fully offscreen, not in the diver's light cone.
+        var/particles/p = emitter.particles
+        if(p)
+            p.spawning = 0
+        QDEL_IN(emitter, 5 SECONDS)
 
 /// Read native lighting corner luminance. This is not a second light engine.
 /// The corners are maintained by SSlighting and already account for the
@@ -756,20 +784,25 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         brightness = max(brightness, check_turf.lighting_corner_SW.largest_color_luminosity)
     return brightness
 
-/// Barotrauma uses four independently scrolling water particle TEXTURE layers.
-/// BYOND doesn't expose their MonoGame renderer, so use four small textured
-/// particle classes distributed on at most 24 visible, underwater turfs.
-/// Background flecks are dim; brighter sheets use cached native light levels.
-/// A stable deterministic density pattern avoids random reallocation and
-/// eliminates camera-relative HUD dots that rendered through walls.
+/// C4.6: stable, WORLD-SPACE suspended sediment.
+/// The old parallax plates were screen centred, exposing a fading disc around
+/// the diver. The old view(7) algorithm capped emission after the first 14
+/// eligible tiles, creating a local halo and churning emitters as the camera
+/// moved. Additionally, light-sampling instantiated / removed "lit" particles
+/// every time flashlight corner-luminance fluctuated.
+///
+/// Emitters now live on a deterministic sparse world-tile lattice. Seed at
+/// least four tiles OUTSIDE a normal 15x15 view. Their selection does not
+/// depend on illumination: native GAME_PLANE lighting darkens/reveals the SAME
+/// emitters continuously, without server-side flashlight churn.
+/// World position and tile hash are stable for every viewer. Shared refcounts
+/// bound duplicates and stop emitter objects when the last viewer leaves.
 /datum/status_effect/ocean_swimming/proc/update_ocean_visuals()
     var/client/current_client = owner?.client
     var/turf/current_turf = get_turf(owner)
-    // Defensive fallback for teleports or custom Z transitions which might
-    // not pass through the usual movement callback ordering.
     if(last_underwater_visual_z && last_underwater_visual_z != current_turf?.z)
-        stop_ocean_visuals()
-        parallax_obstructed_checks = 0
+        // Preserve the existing Z-transition behaviour: visual tint and
+        // refraction stay mounted while world emitters repopulate the new Z.
         next_parallax_environment_check_at = 0
         next_mote_refresh_at = 0
     last_underwater_visual_z = current_turf?.z
@@ -779,63 +812,61 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         stop_ocean_visuals()
         return
     if(!ocean_visual_client)
-        owner.overlay_fullscreen("ocean_immersion_haze", /atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze)
+        ocean_haze = owner.overlay_fullscreen("ocean_immersion_haze", /atom/movable/screen/fullscreen/color_vision/ocean_immersion_haze)
         ocean_visual_client = current_client
+    if(ocean_haze && current_turf)
+        var/depth = ocean_water_depth_meters(current_turf)
+        ocean_haze.alpha = clamp(round(16 + depth * 0.32), 16, 76)
+        ocean_haze.color = rgb(clamp(round(22 - depth * 0.12), 4, 22), clamp(round(107 - depth * 0.49), 21, 107), clamp(round(135 - depth * 0.37), 40, 135))
     update_ocean_refraction()
-    update_ocean_parallax()
+    if(ocean_parallax_enabled)
+        update_ocean_parallax()
+    else if(length(ocean_parallax_plates))
+        stop_ocean_parallax()
     if(world.time < next_mote_refresh_at)
         return
     next_mote_refresh_at = world.time + 5
 
-    // Use native LOS *and* native lighting. Never draw a huge screen-space
-    // starfield through walls. Actual BYOND particles are animated client-side.
     var/list/obj/effect/ocean_marine_snow_tile/new_ambient = list()
     var/list/obj/effect/ocean_marine_snow_tile/illuminated/new_lit = list()
-    var/ambient_budget = 22
-    var/lit_budget = 20
-    var/list/visible_wet_turfs = list()
-    for(var/turf/open/spot in view(7, owner))
+    // Camera-independent density, not 'first N turfs from view()'. Keep
+    // generous guard caps for unusually large ranges; typical allocations
+    // are ~35 ambient and ~25 lit per diver, shared across divers.
+    var/ambient_budget = 76
+    var/lit_budget = 60
+    for(var/turf/open/spot in range(11, owner))
         if(spot.z != owner.z || !is_submerged_ocean_turf(spot))
             continue
-        visible_wet_turfs[spot] = TRUE
-        // Deterministic sparse placement keeps emitters stable while moving
-        // and avoids regular grid patterns. Each emitter now emits ONE soft mote
-        // at a time, not a rectangular sheet of pre-rendered bright flecks.
-        var/hashed = (spot.x * 31 + spot.y * 17 + spot.z * 13) % 11
-        if(length(new_ambient) < ambient_budget && hashed < 5)
-            var/ambient_variant = hashed < 3 ? 1 : 2
-            var/obj/effect/ocean_marine_snow_tile/kept = null
-            for(var/obj/effect/ocean_marine_snow_tile/previous as anything in ocean_motes)
-                if(previous.loc == spot && previous.ocean_shared_variant == ambient_variant && !QDELETED(previous))
-                    kept = previous
+        // 4/41 and 4/61 respectively. Independent hashes avoid stacking
+        // both emitter depths on most of the same tiles.
+        var/ambient_hash = (spot.x * 73 + spot.y * 137 + spot.z * 43) % 41
+        if(ambient_hash < 4 && length(new_ambient) < ambient_budget)
+            var/ambient_variant = ambient_hash % 2 == 0 ? 1 : 2
+            var/obj/effect/ocean_marine_snow_tile/ambient_emitter
+            for(var/obj/effect/ocean_marine_snow_tile/old_ambient as anything in ocean_motes)
+                if(old_ambient.loc == spot && old_ambient.ocean_shared_variant == ambient_variant && !QDELETED(old_ambient))
+                    ambient_emitter = old_ambient
                     break
-            if(!kept)
-                kept = ocean_water_acquire_shared_mote(spot, ambient_variant)
-            if(kept)
-                new_ambient += kept
-        if(length(new_lit) < lit_budget && ocean_water_native_light_strength(spot) > 0.10)
-            var/lit_variant = hashed % 4 == 0 ? 4 : 3
-            var/obj/effect/ocean_marine_snow_tile/illuminated/kept_lit = null
-            for(var/obj/effect/ocean_marine_snow_tile/illuminated/previous_lit as anything in ocean_lit_motes)
-                if(previous_lit.loc == spot && previous_lit.ocean_shared_variant == lit_variant && !QDELETED(previous_lit))
-                    kept_lit = previous_lit
+            if(!ambient_emitter)
+                ambient_emitter = ocean_water_acquire_shared_mote(spot, ambient_variant)
+            if(ambient_emitter)
+                new_ambient += ambient_emitter
+        // Lit-looking motes are STATIC emitters too. They are never gated
+        // on flashlight / native corner luminance, which was their popping
+        // failure mode. Rendering through native lighting still makes them
+        // brighten in light and disappear naturally in unlit darkness.
+        var/lit_hash = (spot.x * 89 + spot.y * 149 + spot.z * 59) % 61
+        if(lit_hash < 4 && length(new_lit) < lit_budget)
+            var/lit_variant = lit_hash == 0 ? 4 : 3
+            var/obj/effect/ocean_marine_snow_tile/illuminated/lit_emitter
+            for(var/obj/effect/ocean_marine_snow_tile/illuminated/old_lit_candidate as anything in ocean_lit_motes)
+                if(old_lit_candidate.loc == spot && old_lit_candidate.ocean_shared_variant == lit_variant && !QDELETED(old_lit_candidate))
+                    lit_emitter = old_lit_candidate
                     break
-            if(!kept_lit)
-                kept_lit = ocean_water_acquire_shared_mote(spot, lit_variant)
-            if(kept_lit)
-                new_lit += kept_lit
-                ocean_lit_last_seen[kept_lit] = world.time
-
-    // Corner lighting on movable flashlights may briefly lag an animation
-    // frame. Preserve existing emitters for 1.5 s only while their turf is
-    // still visible and submerged. No through-wall or stale-Z ghost specks.
-    for(var/obj/effect/ocean_marine_snow_tile/illuminated/existing as anything in ocean_lit_motes)
-        if(existing in new_lit || QDELETED(existing))
-            continue
-        if(length(new_lit) >= lit_budget)
-            break
-        if(visible_wet_turfs[existing.loc] && world.time - (ocean_lit_last_seen[existing] || 0) <= 15)
-            new_lit += existing
+            if(!lit_emitter)
+                lit_emitter = ocean_water_acquire_shared_mote(spot, lit_variant)
+            if(lit_emitter)
+                new_lit += lit_emitter
 
     for(var/obj/effect/ocean_marine_snow_tile/old as anything in ocean_motes)
         if(!(old in new_ambient))
@@ -843,7 +874,6 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     ocean_motes = new_ambient
     for(var/obj/effect/ocean_marine_snow_tile/illuminated/old_lit as anything in ocean_lit_motes)
         if(!(old_lit in new_lit))
-            ocean_lit_last_seen -= old_lit
             ocean_water_release_shared_mote(old_lit)
     ocean_lit_motes = new_lit
 
@@ -960,6 +990,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
     stop_ocean_parallax()
     stop_ocean_refraction()
     owner?.clear_fullscreen("ocean_immersion_haze", FALSE)
+    ocean_haze = null
     ocean_visual_client = null
 
 /// Stop only our dedicated loop; do not interfere with Oshan's other sounds.
@@ -968,6 +999,7 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         SEND_SOUND(ocean_sound_client, sound(null, repeat = FALSE, wait = FALSE, channel = CHANNEL_OCEAN_RUMBLE))
         ocean_sound_client = null
         ocean_sound_volume = 0
+    next_ocean_sound_check_at = 0
 
 /// Play the continuous low-volume water bed for this client alone. It is
 /// separate from the area ambience and existing ship hum (CHANNEL_BUZZ).
@@ -977,22 +1009,37 @@ GLOBAL_LIST_EMPTY(ocean_water_shared_mote_claims)
         SEND_SOUND(ocean_sound_client, sound(null, repeat = FALSE, wait = FALSE, channel = CHANNEL_OCEAN_RUMBLE))
         ocean_sound_client = null
         ocean_sound_volume = 0
+        next_ocean_sound_check_at = 0
     if(!current_client)
         return
 
     var/new_volume = calculate_mixed_volume(current_client, 17, CHANNEL_BUZZ)
-    if(ocean_sound_client == current_client && ocean_sound_volume == new_volume)
+    var/sound_missing = FALSE
+    // Status effects tick frequently. Query the client at most once every
+    // 10 seconds per swimmer, and NEVER replay a healthy looping channel.
+    if(ocean_sound_client == current_client && new_volume > 0 && world.time >= next_ocean_sound_check_at)
+        next_ocean_sound_check_at = world.time + 10 SECONDS
+        sound_missing = TRUE
+        for(var/sound/playing as anything in current_client.SoundQuery())
+            if(playing.channel == CHANNEL_OCEAN_RUMBLE)
+                sound_missing = FALSE
+                break
+    if(ocean_sound_client == current_client && ocean_sound_volume == new_volume && !sound_missing)
         return
 
     if(new_volume <= 0)
         SEND_SOUND(current_client, sound(null, repeat = FALSE, wait = FALSE, channel = CHANNEL_OCEAN_RUMBLE))
-    else if(ocean_sound_client == current_client && ocean_sound_volume > 0)
-        // Respect live White Noise/master mixer adjustments without restarting the loop.
+    else if(ocean_sound_client == current_client && ocean_sound_volume > 0 && !sound_missing)
+        // Mixer volume update keeps the existing sound phase intact.
         var/sound/updated_sound = sound(null, channel = CHANNEL_OCEAN_RUMBLE, volume = new_volume)
         updated_sound.status = SOUND_UPDATE
         SEND_SOUND(current_client, updated_sound)
     else
+        // Recover only after SoundQuery confirms the loop isn't active.
         SEND_SOUND(current_client, sound('sound/ambience/ocean/ocean_rumble.ogg', repeat = TRUE, wait = FALSE, volume = new_volume, channel = CHANNEL_OCEAN_RUMBLE))
+        if(sound_missing)
+            ocean_sound_recoveries++
+        next_ocean_sound_check_at = world.time + 10 SECONDS
     ocean_sound_client = current_client
     ocean_sound_volume = new_volume
 
@@ -1060,7 +1107,14 @@ ADMIN_VERB(ocean_water_rendering_inspect, R_DEBUG, FALSE, "Water: Inspect Underw
                 seabed_bubble_count++
             last_bubble_plane = bubble.plane
     to_chat(user, span_notice("Water C4.5.2: turf [swimmer_turf?.type], seabed [!!isoceanturf(swimmer_turf)], seabed bubble emitters [seabed_bubble_count], last bubble plane [last_bubble_plane], Z transition pending [active.z_transition_refresh_pending]."))
-    to_chat(user, span_notice("C4.5.1: texture plates [length(active.ocean_parallax_plates)] (enabled [active.ocean_parallax_enabled], obstruction checks [active.parallax_obstructed_checks]), wave filter attached [!!active.ocean_refraction_controller?.get_filter("ocean_soft_refraction")] (enabled [active.ocean_refraction_enabled]), native lit cells [length(active.ocean_lit_motes)], visual Z [active.last_underwater_visual_z], mob Z [swimmer.z]."))
+    to_chat(user, span_notice("C4.5.3: texture plates [length(active.ocean_parallax_plates)] (enabled [active.ocean_parallax_enabled], obstruction checks [active.parallax_obstructed_checks]), wave filter attached [!!active.ocean_refraction_controller?.get_filter("ocean_soft_refraction")] (enabled [active.ocean_refraction_enabled]), native lit cells [length(active.ocean_lit_motes)], visual Z [active.last_underwater_visual_z], mob Z [swimmer.z]."))
+    var/rumble_playing = FALSE
+    if(active.ocean_sound_client)
+        for(var/sound/S as anything in active.ocean_sound_client.SoundQuery())
+            if(S.channel == CHANNEL_OCEAN_RUMBLE)
+                rumble_playing = TRUE
+                break
+    to_chat(user, span_notice("Ocean rumble: active on client [rumble_playing], requested volume [active.ocean_sound_volume], watchdog recoveries [active.ocean_sound_recoveries]."))
 
 ADMIN_VERB(ocean_water_toggle_refraction, R_DEBUG, FALSE, "Water: Toggle Refraction", "Toggle the local diver's world-only underwater refraction filter for A/B testing.", ADMIN_CATEGORY_DEBUG)
     if(!isliving(user.mob))
