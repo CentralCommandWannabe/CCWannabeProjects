@@ -393,7 +393,7 @@
 	contact_role = "Relay Operations Officer"
 
 /datum/ccpost_sector_contact/rel_a17/contact_4
-	contact_name = "DAV-714"
+	contact_name = "DORA-241"
 	contact_role = "Relay Diagnostics Unit"
 
 /datum/ccpost_sector_installation_template/rel_a17
